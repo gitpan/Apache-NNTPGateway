@@ -1,0 +1,9 @@
+2000-10-04  heddy Boubaker  <boubaker@cena.fr>
+
+	* v0.8: First CPAN release.
+
+2000-10-02  heddy Boubaker  <boubaker@cena.fr>
+
+	* original version; created by h2xs 1.20 with options -AX -n
+	Apache::NNTPGateway
+
