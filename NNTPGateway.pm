@@ -1,4 +1,4 @@
-#!/usr/local/bin/perl
+#!/usr/local/bin/perl -w --
 # ------------------------------------------------------------------------
 # Apache/NNTPGateway.pm: Apache mod_perl Handler.
 # - Web Interface to NNTP. The complete pod doc is at the __END__.
@@ -12,21 +12,24 @@ use strict;
 #use warnings;
 use vars qw($VERSION $DEBUG $NNTP);
 
-$VERSION = '0.8';
+$VERSION = '0.9';
 
 # Needed packages
 
 use Apache::Constants qw(:common);
 use Apache::URI qw();
 use Apache::Request qw();
+use Apache::Log qw();
 
 #use CGI qw/:standard/;
 use CGI::Cookie qw();
 
+# Net::NNTP @ISA Net::Cmd, IO::Socket
+use IO::Socket;
+use Net::Cmd qw(CMD_REJECT CMD_ERROR);
 use Net::NNTP qw();
 
 use Net::Config qw();
-use Net::Cmd qw();
 use Net::Domain qw();
 
 use Mail::Address qw();
@@ -41,25 +44,34 @@ $DEBUG = 0;
 
 # This variable is a protection against installing this handler in an
 # unwanted Location. If set, the URL of the request is matched against
-# this var and the handler continue processing only if the matche
-# succeed. Check get_config() sub for more details. 
+# this var and the handler continue processing only if the match
+# succeed. Check get_config() sub for more details.
 my $REQUIRED_LOCATION_BASE_RE = undef;
 
 # The default NNTP server used, on correctly configured systems, with
 # correctly configured Net modules, this should be ok, but this could
-# be overriden by a server config NNTPGatewayNewsServer anyway.
+# be overridden by a server config NNTPGatewayNewsServer anyway.
 my $DEFAULT_NEWS_SERVER = $Net::Config::NetConfig{nntp_hosts}->[0] || 'newsserver';
 
-# You should have nothing to modify below this line... except maybe in
-# the MESSAGES or HTML DECORATIONS sections.
+####
+## You should have nothing to modify below this line... except maybe in
+## the MESSAGES or HTML DECORATIONS sections.
+####
+
+# Garbage cans
+my @_dummy_; 
+my $_dummy_;
 
 my $DOMAIN_NAME   = &Net::Domain::hostdomain() || $Net::Config::NetConfig{inet_domain};
+if ( defined $DOMAIN_NAME && $DOMAIN_NAME ne '' ) {
+    ($DOMAIN_NAME, @_dummy_) = split ':', $DOMAIN_NAME;
+}
 my $COOKIE_DOMAIN = $DOMAIN_NAME;
 my $SERVER_NAME   = 'www';
 
 # NOT YET IMPLEMENTED!
-# Server Root relative directory containing HTML Templates files, 
-# could be overriden by Directory config NNTPGatewayTemplatesDir.
+# Server Root relative directory containing HTML Templates files,
+# could be overridden by Directory config NNTPGatewayTemplatesDir.
 my $DEFAULT_TEMPLATES_DIR = "lib/templates/${NAMETAG}";
 
 # See Actions_Map.
@@ -70,10 +82,18 @@ my $DEFAULT_ACTION_NAME   = 'last';
 my $DEFAULT_ORGANIZATION  = 'The Disorganized Corp';
 
 # HTML DECORATIONS
+my $HTML_DTD        = "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\" \"http://www.w3.org/TR/REC-html40/loose.dtd\">";
 my $BODY_BGCOLOR    = '#eeeeee';
 my $HEADER_BGCOLOR1 = '#ccccdd';
 my $HEADER_BGCOLOR2 = '#ddddee';
 my $MENU_BGCOLOR    = 'silver';
+
+# Css classes names
+my $article_class          = "nntp:article";
+my $article_id_class       = "$article_class:id";
+my $article_subject_class = "$article_class:subject";
+my $article_from_class    = "$article_class:from";
+my $article_date_class    = "$article_class:date";
 
 
 # Variables & So ---------------------------------------------------------
@@ -92,51 +112,51 @@ $NNTP = undef;
 
 # Misc information about this module.
 my $PKG_NAME      = __PACKAGE__ . " v${VERSION}";
-my $PKG_AUTHOR    = "heddy Boubaker &lt;boubaker\@cena.fr&gt;";
-my $PKG_COPYRIGTH = "${PKG_NAME} (&copy;) 2000-" .  (1900 + (localtime)[5]) . " CENA/SSS/${PKG_AUTHOR}";
+my $PKG_AUTHOR    = 'heddy Boubaker &lt;boubaker@cpan.org&gt;';
+my $PKG_COPYRIGHT = "${PKG_NAME} (&copy;) 2000-" .  (1900 + (localtime)[5]) . " CENA/SSS/${PKG_AUTHOR}";
 my $PKG_HOMEPAGE  = 'http://www.tls.cena.fr/~boubaker/WWW/Apache-NNTPGateway.shtml';
 
-# MESSAGES, stuff that is printed on the users's screen...  
-# The current default language: Should be an entry in Messages_Map &
-# LANGS_OK
+# MESSAGES, stuff that is printed on the user's screen... The current default
+# language: Should be an entry in Messages_Map & LANGS_OK
 my $USR_LANG = 'fr';
+#my $USR_LANG = 'en';
 # Allowed languages choice.
 my %LANGS_OK = ( 'fr' => 1, 'en' => 1 );
+
 # All messages that could be printed.
-my %Messages_Map = 
+my %Messages_Map =
   (
-   'n_unread' => 
-   { 
+   'n_unread' =>{
     # format: nb-articles
-    'en' => "%d unread article(s):", 
-    'fr' => "%d article(s) non lus:", 
-   }, 
-   'no_unread' => 
-   { 
-    'en' => "No unread articles", 
-    'fr' => "Pas d'articles non lus", 
-   }, 
-   'no_arts' => 
-   { 
+    'en' => "%d unread article(s):",
+    'fr' => "%d article(s) non lus:",
+   },
+   'no_unread' =>
+   {
+    'en' => "No unread articles",
+    'fr' => "Pas d'articles non lus",
+   },
+   'no_arts' =>
+   {
     'en' => "No articles in this group",  
     'fr' => "Pas d'articles dans ce groups", 
-   }, 
-   'no_new' => 
-   { 
+   },
+   'no_new' =>
+   {
     'en' => "No new unread articles",  
     'fr' => "Pas de nouveaux articles non lus", 
    }, 
-   'no_ref' => 
+   'no_ref' =>
    { 
     'en' => "No article reference id!", 
     'fr' => "Pas de numero d'article reference!", 
    }, 
-   'no_id' => 
-   { 
+   'no_id' =>
+   {
     # format: article-id
-    'en' => "Could not get article id %d !", 
+    'en' => "Could not get article id %d, may have been canceled !", 
     'fr' => "Ne peut obtenir l'article No %d !", 
-   }, 
+   },
    'inv_id' => 
    {  
     # format: article-id
@@ -175,10 +195,15 @@ my %Messages_Map =
     'en' => "Posting not allowed !", 
     'fr' => "Postage interdit !", 
    },  
+   'post_warning' => 
+   {
+    'en' => "Make sure you are posting your message to the appropriate bulletin board !", 
+    'fr' => "Tous les champs sont obligatoires !", 
+   },  
    'all_fields' => 
    {
-    'en' => "All fields are mandatory !", 
-    'fr' => "Tous les champs sont obligatoires !", 
+    'en' => "(All fields are mandatory)", 
+    'fr' => "(Tous les champs sont obligatoires)", 
    },  
    'posted' => 
    {
@@ -366,6 +391,7 @@ my $The_Action             = $DEFAULT_ACTION_NAME;
 my $Title                  = $PKG_NAME;
 my $NNTP_Server            = $DEFAULT_NEWS_SERVER;
 my $The_Newsgroup          = undef;
+my $The_GroupDescription   = undef;
 my $NewsUrl                = "news://$NNTP_Server/$The_Newsgroup";
 my $Base                   = '/';
 my $StyleSheet             = '';
@@ -498,7 +524,7 @@ sub action_list  ( $ ) {
       $Args->{first_art} = $catchupid +1;
     } elsif ( $catchupid ) {
       # The main reason to get here is that the newsserver
-      # administrator disabled the newnews command, vilain!
+      # administrator disabled the newnews command, villain!
       $Args->{first_art} = $catchupid +1;
     }
   }
@@ -577,12 +603,15 @@ sub action_catchup ( $ ) {
   $r->print( "\n<hr noshade>\n" );
 
   # Just Inform user
-  $r->print( "<h2 align=\"center\">${NewsUrl}<br>\n<font color=\"red\">", 
-             &message( 'catchup_at', scalar( localtime( $catchupdate ))), 
-             "</font></h2>\n" );
-  $r->print( "<div align=\"center\">[<a href=\"${Base}/list?force=1\">", 
-             &message( 'list_all' ), 
-             "</a>]</div>\n" );
+  $r->print
+    ( 
+     "<h2 align=\"center\">${NewsUrl}<br>\n<font color=\"red\">", 
+     &message( 'catchup_at', scalar( localtime( $catchupdate ))), 
+     "</font></h2>\n", 
+     "<div align=\"center\">[<a href=\"${Base}/list?force=1\">", 
+     &message( 'list_all' ), 
+     "</a>]</div>\n" 
+    );
 
   # Print menu
   $r->print( "\n<hr noshade>\n" );
@@ -618,11 +647,6 @@ sub action_last ( $\$ ) {
 sub action_read ( $\$$ ) {
   my ($r, $id, $no_cache ) = @_;
 
-  # Print html header
-  &print_html_head( $r, $no_cache );
-  # Print menu
-  &print_html_menu( $r );
-
   # Get id of article to read
   my $args = $Args->{action_args};
   if ( $args && @$args ) {
@@ -635,11 +659,19 @@ sub action_read ( $\$$ ) {
   # Get the article and print it.
   my $Article = &nntp_get_article( $id );
   if ( $Article ) {
+
+    # Got it!
+    my $title = $Article->{Header}{subject} || "article $id";
+    &print_html_head( $r, $no_cache, $title );
+    &print_html_menu( $r );
     &print_html_article( $r, $Article, 0, 
                          $Args->{headers} eq 'max', 
                          $Args->{showsig} );
   } else {
+
     # invalid article id
+    &print_html_head( $r, $no_cache, &message( 'inv_id', $id ));
+    &print_html_menu( $r );
     &print_html_error( $r, &message( 'inv_id', $id ));
   }
 
@@ -700,7 +732,7 @@ sub action_followup ( $\$ ) {
     $body .= $Article->{Body} . "\n\n";
     # Print a form for user to edit fields and post.
     &print_html_post_form( $r, $subject, $body, $refs );
-    # The remainning, that is the real NNTP posting is handled by
+    # The remaining, that is the real NNTP posting is handled by
     # action_post() which is called from a submit (POST method) with
     # the form with the right arguments.
 
@@ -754,6 +786,18 @@ sub action_post ( $ ) {
     my $subject = $Args->{subject};
     my $body    = $Args->{body};
     my $refs    = $Args->{refs};
+
+    # Jie's modification for WASM authentication check.
+#    unless (defined $from && $from eq $ENV{'USER_NAME'}) {
+#      &print_html_error( $r, &message( 'You are only allowed to post as yourself.' ));
+#      &print_html_post_form( $r, $subject, $body );
+#      $r->print( "\n<hr noshade>\n" );
+#      &print_html_menu( $r );
+#      # Print html footer
+#      &print_html_foot( $r );
+#      return;
+#    }
+
     unless ( $from && $body && $subject ) {
       # From && Body && Subject are required
       &print_html_error( $r, &message( 'retry_post' ));
@@ -769,27 +813,29 @@ sub action_post ( $ ) {
     my $from_name = $From_Posters{$from};
     $from .= "\@" . $DOMAIN_NAME unless $from =~ /\@.+/;
     $from .= " ($from_name)" if $from_name;
+
     # Do post the article here
     $r->log->notice( "Posting message \"$subject\" to $NewsUrl..." );
     if ( &nntp_post_article( $subject, $from, $body, $refs )) {
 
       # Print confirmation
-      $r->print(
-                "<table width=\"100%\">\n", 
-                "\t<caption><strong>", &message( 'posted', $NewsUrl ), "</strong></caption>\n", 
-                "\t<tr>\n", 
-                "\t\t<td width=\"5%\"><strong><u>", &message('from'), "</u>:</strong></td>\n", 
-                "\t\t<td bgcolor=\"$HEADER_BGCOLOR1\">$from</td>\n", 
-                "\t</tr>\n", 
-                "\t<tr>\n", 
-                "\t\t<td width=\"5%\"><strong><u>", &message('subject'), "</u>:</strong></td>\n", 
-                "\t\t<td bgcolor=\"$HEADER_BGCOLOR1\">$subject</td>\n", 
-                "\t</tr>\n", 
-                "\t<tr>\n", 
-                "\t\t<td colspan=\"2\" bgcolor=\"$BODY_BGCOLOR\"><pre>$body</pre></td>\n", 
-                "\t</tr>\n", 
-                "</table>\n", 
-               );
+      $r->print
+        (
+         "<table width=\"100%\">\n", 
+         "\t<caption><strong>", &message( 'posted', $NewsUrl ), "</strong></caption>\n", 
+         "\t<tr>\n", 
+         "\t\t<td width=\"5%\"><strong><u>", &message('from'), "</u>:</strong></td>\n", 
+         "\t\t<td bgcolor=\"$HEADER_BGCOLOR1\"><span class=\"$article_from_class\">$from</span></td>\n", 
+         "\t</tr>\n", 
+         "\t<tr>\n", 
+         "\t\t<td width=\"5%\"><strong><u>", &message('subject'), "</u>:</strong></td>\n", 
+         "\t\t<td bgcolor=\"$HEADER_BGCOLOR1\"><span class=\"$article_subject_class\">$subject</span></td>\n", 
+         "\t</tr>\n", 
+         "\t<tr>\n", 
+         "\t\t<td colspan=\"2\" bgcolor=\"$BODY_BGCOLOR\"><pre>$body</pre></td>\n", 
+         "\t</tr>\n", 
+         "</table>\n", 
+        );
     } else {
       # Post failed
       &print_html_error( $r, &message( 'no_post_ok' ));
@@ -831,94 +877,115 @@ sub print_html_article ( $$\$$$ ) {
   if ( $header_only && $fullheaders ) {
 
     # Print one line only article but with some more headers
-    $r->print( 
-              "<table width=\"100%\">\n", 
-              "\t<tr>\n", 
-              "\t<td bgcolor=\"$HEADER_BGCOLOR2\" width=\"15%\">\n", 
-              "\t\t<font size=\"-1\"><a name=\"__${id}__\">${id}</a>:&nbsp;", 
-              "[<a href=\"${Base}/read/${id}\">", &message('read'), "</a>]", 
-              "[<a href=\"${Base}/followup/${id}\">", &message('followup'), "</a>]", 
-              "</font></td>\n", 
-              "\t<td bgcolor=\"$HEADER_BGCOLOR1\" align=\"center\" width=\"30%\">\n", 
-              "\t\t<font size=\"-1\"><em>", $A->{Header}{date}, "</em></font></td>\n", 
-              "\t<td bgcolor=\"$HEADER_BGCOLOR1\" align=\"center\">\n", 
-              "\t\t<font size=\"-1\"><em><a href=\"mailto:", $A->{Header}{_from_email}, "\"><strong>", 
-              $A->{Header}{_from_name}, "<strong></a></em></font></td>\n", 
-              "\t</tr>\n", 
-              "\t<tr>\n", 
-              "\t<td align=\"right\" width=\"15%\"><font size=\"-1\"><em>", 
-              $A->{Header}{lines}, " lines</em></font>&nbsp;</td>\n", 
-              "\t<td colspan=\"2\" bgcolor=\"$BODY_BGCOLOR\">&nbsp;&quot;<a href=\"${Base}/read/${id}\">", 
-              $A->{Header}{_subject_html}, "</a>&quot;</td>\n", 
-              "\t</tr></table>\n", 
-             );
-              
+    $r->print
+      (
+       "<table width=\"100%\">\n", 
+       "\t<tr>\n", 
+       "\t<td bgcolor=\"$HEADER_BGCOLOR2\" width=\"15%\">\n", 
+       "\t\t<font size=\"-1\"><a name=\"__${id}__\">${id}</a>:&nbsp;", 
+       "[<a href=\"${Base}/read/${id}\">", &message('read'), "</a>]", 
+       "[<a href=\"${Base}/followup/${id}\">", &message('followup'), "</a>]", 
+       "</font></td>\n", 
+       "\t<td bgcolor=\"$HEADER_BGCOLOR1\" align=\"center\" width=\"30%\">\n", 
+       "\t\t",
+       "<span class=\"$article_date_class\"><font size=\"-1\"><em>", $A->{Header}{date}, "</em></font></span>", 
+       "</td>\n", 
+       "\t<td bgcolor=\"$HEADER_BGCOLOR1\" align=\"center\">\n", 
+       "\t\t<font size=\"-1\"><em><a href=\"mailto:", $A->{Header}{_from_email}, "\">", 
+       "<span class=\"$article_from_class\"><strong>", $A->{Header}{_from_name}, "</strong></span>", 
+       "</a></em></font></td>\n", 
+       "\t</tr>\n", 
+       "\t<tr>\n", 
+       "\t<td align=\"right\" width=\"15%\"><font size=\"-1\"><em>", 
+       $A->{Header}{lines}, " lines</em></font>&nbsp;</td>\n", 
+       "\t<td colspan=\"2\" bgcolor=\"$BODY_BGCOLOR\">&nbsp;&quot;<a href=\"${Base}/read/${id}\">", 
+       "<span class=\"$article_subject_class\">", $A->{Header}{_subject_html}, "</span>", 
+       "</a>&quot;</td>\n", 
+       "\t</tr></table>\n", 
+      );
+
   } elsif ( $header_only ) {
 
     # Print one line only article
-    $r->print( 
-              "<strong><a name=\"__${id}__\">$id</a></strong>:&nbsp;&quot;<em><a href=\"${Base}/read/${id}\">", 
-              $A->{Header}{_subject_html}, "</a></em>&quot;&nbsp;", 
-              lc(&message('from')), "&nbsp;<font size=\"-1\">", 
-              "&lt;<a href=\"mailto:", $A->{Header}{_from_email}, "\">", $A->{Header}{_from_name}, "</a>&gt;", 
-              "</font><br>\n", 
-              );
+    $r->print
+      (
+       "<div class=\"$article_class\">",
+       "<span class=\"$article_id_class\"><strong><a name=\"__${id}__\">$id</a></strong></span>", 
+       ":&nbsp;&quot;<a href=\"${Base}/read/${id}\">", 
+       "<span class=\"$article_subject_class\"><em>", $A->{Header}{_subject_html}, "</em></span>", 
+       "</a>&quot;&nbsp;", lc(&message('from')), "&nbsp;",
+       "&lt;<a href=\"mailto:", $A->{Header}{_from_email}, "\">", 
+       "<span class=\"$article_from_class\"><font size=\"-1\">", $A->{Header}{_from_name}, "</font></span>", 
+       "</a>&gt;<br>",
+       "</div>\n", 
+      );
 
   } else {
 
     # Print the full article
     $r->print( "<table width=\"100%\"><a name=\"__${id}__\">&nbsp;</a>\n", );
     &print_html_article_menu( $r, $A, 1 );
-    $r->print(
-              "\t<tr>\n",
-              "\t<td><strong><u>", &message('from'), "<u>:</strong></td>\n", 
-              "\t<td bgcolor=\"$HEADER_BGCOLOR1\"><a href=\"mailto:", 
-              $A->{Header}{_from_email}, "?Subject=Re:%20", $A->{Header}{_subject_html}, "\">", 
-              $A->{Header}{_from_name}, "</a></td>\n", 
-              "\t</tr>\n", 
-              "\t<tr>\n",
-              "\t<td><strong><u>", &message('date'), "<u>:</strong></td>\n", 
-              "\t<td bgcolor=\"$HEADER_BGCOLOR1\">", $A->{Header}{date}, "</td>\n", 
-              "\t</tr>\n", 
-              "\t<tr>\n",
-              "\t<td><strong><u>", &message('subject'), "<u>:</strong></td>\n", 
-              "\t<td bgcolor=\"$HEADER_BGCOLOR1\"><strong>", $A->{Header}{_subject_html}, "</strong></td>\n", 
-              "\t</tr>\n", 
-              );
-    
+    $r->print
+      (
+       "\t<tr>\n",
+       "\t<td><strong><u>", &message('from'), "<u>:</strong></td>\n", 
+       "\t<td bgcolor=\"$HEADER_BGCOLOR1\"><a href=\"mailto:", 
+       $A->{Header}{_from_email}, "?Subject=Re:%20", $A->{Header}{_subject_html}, "\">", 
+       "<span class=\"$article_from_class\">", $A->{Header}{_from_name}, "</span>", 
+       "</a></td>\n",
+       "\t</tr>\n", 
+       "\t<tr>\n",
+       "\t<td><strong><u>", &message('date'), "<u>:</strong></td>\n", 
+       "\t<td bgcolor=\"$HEADER_BGCOLOR1\">", 
+       "<span class=\"$article_date_class\">", $A->{Header}{date}, "</span>", 
+       "</td>\n", 
+       "\t</tr>\n", 
+       "\t<tr>\n",
+       "\t<td><strong><u>", &message('subject'), "<u>:</strong></td>\n", 
+       "\t<td bgcolor=\"$HEADER_BGCOLOR1\">", 
+       "<span class=\"$article_subject_class\"><strong>", $A->{Header}{_subject_html}, "</strong></span>", 
+       "</td>\n", 
+       "\t</tr>\n", 
+      );
+
     if ( $fullheaders ) {
+
       # Print all headers
       foreach ( keys( %{$A->{Header}} )) {
         # Do not print already printed headers and private internals _headers.
         next if exists $Used_Headers_Map{$_} || $_ =~ /^_/; 
-        $r->print(
-                  "\t<tr>\n", 
-                  "\t<td><em><u>$_</u>:</em></td>\n", 
-                  "\t<td bgcolor=\"$HEADER_BGCOLOR2\">", $A->{Header}{$_}, "</td>\n", 
-                  "\t</tr>\n", 
-                  );
+        $r->print
+          (
+           "\t<tr>\n", 
+           "\t<td><em><u>$_</u>:</em></td>\n", 
+           "\t<td bgcolor=\"$HEADER_BGCOLOR2\">", $A->{Header}{$_}, "</td>\n", 
+           "\t</tr>\n", 
+          );
       }
-      $r->print(
-                "\t<tr>\n",
-                "\t<td colspan=\"2\"><font size=\"-1\">", 
-                "[<a href=\"${Base}/read/${id}?headers=min\">", &message('nofullheaders'), "</a>]", 
-                "</font></td>\n",
-                "\t</tr>\n", 
-                );
+      $r->print
+        (
+         "\t<tr>\n",
+         "\t<td colspan=\"2\"><font size=\"-1\">", 
+         "[<a href=\"${Base}/read/${id}?headers=min\">", &message('nofullheaders'), "</a>]", 
+         "</font></td>\n",
+         "\t</tr>\n", 
+        );
     } else {
-      $r->print(
-                "\t<tr>\n",
-                "\t<td colspan=\"2\"><font size=\"-1\">", 
-                "[<a href=\"${Base}/read/${id}?headers=max\">", &message('fullheaders'), "</a>]", 
-                "</font></td>\n", 
-                "\t</tr>\n", 
-               );
+      $r->print
+        (
+         "\t<tr>\n",
+         "\t<td colspan=\"2\"><font size=\"-1\">", 
+         "[<a href=\"${Base}/read/${id}?headers=max\">", &message('fullheaders'), "</a>]", 
+         "</font></td>\n", 
+         "\t</tr>\n", 
+        );
     }
     # The body here ...
-    $r->print( 
-              "\t<tr>\n", 
-              "\t<td colspan=\"2\"><hr><pre><font size=\"+1\">", $A->{Body}, "</font></pre>\n", 
-             );
+    $r->print
+      (
+       "\t<tr>\n", 
+       "\t<td colspan=\"2\"><hr><pre><font size=\"+1\">", $A->{Body}, "</font></pre>\n", 
+      );
     # The .sig ...
     if ( $A->{Signature} ) {
       if ( $showsig ) {
@@ -942,7 +1009,7 @@ sub print_html_article ( $$\$$$ ) {
 
 
 ### Sub print_html_article_menu() ###
-# &print_html_article_menu( reques, Article, in_table ):
+# &print_html_article_menu( request, Article, in_table ):
 # - Description:
 # - Arguments :
 # - Return    :
@@ -950,11 +1017,12 @@ sub print_html_article ( $$\$$$ ) {
 sub print_html_article_menu ( $$\$ ) {
   my ($r, $A, $table) = @_;
   my $id = $A->{Id};
-  $r->print(
-            "\t<tr>\n", 
-            "\t<td><u>Article Id</u>:&nbsp;<strong>$id</strong>:</td>\n", 
-            "\t<td bgcolor=\"$MENU_BGCOLOR\">\n", 
-           ) if $table;
+  $r->print
+    (
+     "\t<tr>\n", 
+     "\t<td><u>Article Id</u>:&nbsp;<strong>$id</strong>:</td>\n", 
+     "\t<td bgcolor=\"$MENU_BGCOLOR\">\n", 
+    ) if $table;
   $r->print( "\t\t<font color=\"blue\" size=\"-1\">\n" );
   unless ( $Disabled_Actions{'read'} ) {
     if ( $A->{Header}{_prev} ) {
@@ -981,10 +1049,11 @@ sub print_html_article_menu ( $$\$ ) {
     }
   }
   $r->print( "\t</font>\n" );
-  $r->print(
-            "\t</td>\n", 
-            "\t</tr>\n", 
-           ) if $table;
+  $r->print
+    (
+     "\t</td>\n", 
+     "\t</tr>\n", 
+    ) if $table;
   return;
 
 } # end print_html_article_menu();
@@ -1103,27 +1172,31 @@ sub print_html_post_form ( $\$$$ ) {
 # - Return    :
 ###
 sub print_html_head ( $\@ ) {
-  my ($r, $no_cache) = @_;
+  my ( $r, $no_cache, $extra_title ) = @_;
+  my $title = $Title;
+  $title .= ": $extra_title" if $extra_title;
   $r->content_type( 'text/html' );
   # Goood, but some more efforts are needed ...
   $r->no_cache($no_cache?1:0);
   $r->send_http_header();
   $r->print( 
-            "\n\n", 
-            "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\" \"http://www.w3.org/TR/REC-html40/loose.dtd\">\n", 
+            "\n\n${HTML_DTD}\n", 
             "<html>\n", 
             "<head>\n", 
-            "<title>$Title</title>\n", 
+            "<title>${title}</title>\n", 
              $StyleSheet?"<LINK REL=StyleSheet HREF=\"$StyleSheet\" TYPE=\"text/css\">":"<!-- no StyleSheet -->", 
              "</head>\n", 
             "<body bgcolor=\"$BODY_BGCOLOR\">\n", 
             "<a name=\"TOP\">&nbsp;</a>\n", 
             "<hr noshade>\n", 
-            "<div align=\"right\"><font size=\"-1\">\n", 
+            "<div align=\"right\" class=\"head\"><font size=\"-1\">\n", 
             "\t<a href=\"$Base\">$PKG_NAME</a>&nbsp;\@&nbsp;<a href=\"$NewsUrl\">$NewsUrl</a>\n", 
             "</font></div>\n", 
-            "<h1 align=\"right\"><a href=\"$Base\">$Title</a></h1>\n", 
+            "<h1 align=\"right\" class=\"title\"><a href=\"$Base\">${title}</a></h1>\n", 
+            
            );
+  $r->print( "<h3 align=\"right\">($The_GroupDescription)</h3>\n" ) if $The_GroupDescription;
+
   return;
 } # end print_html_head();
 
@@ -1138,7 +1211,7 @@ sub print_html_foot ( $ ) {
   my ($r) = @_;
   $r->print( 
             "<hr noshade>\n", 
-            "<div align=\"right\" class=\"copyright\"><em><a href=\"$PKG_HOMEPAGE\">$PKG_COPYRIGTH</a></em></div>\n", 
+            "<div align=\"right\" class=\"copyright\"><em><a href=\"$PKG_HOMEPAGE\">$PKG_COPYRIGHT</a></em></div>\n", 
             "<hr noshade>\n", 
             "</body></html>\n", 
            );
@@ -1217,16 +1290,16 @@ sub to_html ( $ ) {
 ### Sub nntp_connect() ###
 # status = &nntp_connect( request ):
 # - Description: Try hardly to connect to the nntp server.
-# - Arguments  : the Apache requesr
+# - Arguments  : the Apache request
 # - Return     : 1=ok, 0=failure
 ###
 sub nntp_connect ( $ ) {
   my $r = shift;
-  my $allready_tried = 0;
+  my $already_tried = 0;
  NNTPConnect:
   unless ( $NNTP ) {
     $r->log->notice( "($$) Connecting to $NewsUrl ..." ) if $DEBUG;
-    $allready_tried = 1;
+    $already_tried = 1;
     # Not yet connected or disconnected
     $NNTP = new Net::NNTP( $NNTP_Server, 'Debug' => $DEBUG?1:0 );
     unless ( $NNTP ) {
@@ -1235,7 +1308,7 @@ sub nntp_connect ( $ ) {
       return 0;
     }
   } elsif ( not( $NNTP->connected()) && 
-            not( $allready_tried )) {
+            not( $already_tried )) {
     # Timed out connection
     $r->log->notice( "($$) Reconnecting old NNTP connection ..." ) if $DEBUG;
     # $NNTP->connect( ... ); # Buggy!!!
@@ -1245,17 +1318,17 @@ sub nntp_connect ( $ ) {
   } else {
     $r->log->notice( "($$) Reusing old NNTP connection ..." ) if $DEBUG;
   }
-  my $NNTP_HOST = $NNTP->sockhost();
-  my $NNTP_PORT = $NNTP->sockport();
+  #my $NNTP_HOST = $NNTP->sockhost();
+  #my $NNTP_PORT = $NNTP->sockport();
 
   # Setting newsgroup && getting articles IDs
   my($n_arts, $first_art, $last_art) = ($NNTP->group( $The_Newsgroup ));
-  unless ( $first_art && $last_art ) {
-    $r->log->warn( "Could not get newsgroup $The_Newsgroup from $NNTP_Server" );
-    unless ( $allready_tried ) {
+  unless ( defined $first_art && defined $last_art ) {
+    unless ( $already_tried ) {
+      $r->log->warn( "Could not get newsgroup $The_Newsgroup from $NNTP_Server, trying once again..." );
       # Maybe a timeout ... try again once. This should have been
       # handled above in the test for not $NNTP->connected(), but this
-      # is just to be sure
+      # is just to be sure.
       $NNTP->quit();
       $NNTP = undef;
       # Yes !!! a goto !!
@@ -1297,7 +1370,8 @@ sub nntp_post_article ( $$$\$ ) {
   push( @article, $body );
   push( @article, "\n" );
   my $status = $NNTP->post( \@article );
-  if ( $status == CMD_ERROR || $status == CMD_REJECT ) {
+  if ( $status == CMD_ERROR || 
+       $status == CMD_REJECT ) {
     return 0;
   }
   return 1;
@@ -1386,11 +1460,12 @@ sub print_nntp_error ( $$ ) {
   $r->log->warn( "${Base} NNTP Error: $err" );
   &print_html_head( $r );
   &print_html_error( $r, "NNTP Error \@ $NewsUrl", $err );
-  $r->print( 
-            "<div align=\"center\"><font color=\"red\">", 
-            "[<a href=\"",  $r->subprocess_env('SCRIPT_URL'), "\">", &message('try_again'), "</a>]", 
-            "</font></div>\n", 
-           );
+  $r->print
+    (
+     "<div align=\"center\"><font color=\"red\">", 
+     "[<a href=\"",  $r->subprocess_env('SCRIPT_URL'), "\">", &message('try_again'), "</a>]", 
+     "</font></div>\n", 
+    );
   &print_html_foot( $r );
   return;
 } # end print_nntp_error();
@@ -1405,7 +1480,7 @@ sub print_nntp_error ( $$ ) {
 # status = &get_args( request ):
 # - Description: Fill in the global hash Args. The args are processed
 #   in this order: Cookies, path_info, environment variables, GET then
-#   POST args, each arg overriding previous one if allready defined.
+#   POST args, each arg overriding previous one if already defined.
 # - Arguments  : the Apache request
 # - Return     : 1=ok, 0=failure
 ###
@@ -1436,7 +1511,7 @@ sub get_args ( $ ) {
     $Args->{action_args} = \@rest if ( $action && @rest );
   }
 
-  # Get misc usefull environment variables. TODO This really needs
+  # Get misc useful environment variables. TODO This really needs
   # improvements. If anybody have a good idea on how to do it, thanks!
   my $L         = $r->subprocess_env('LANG') || $r->subprocess_env('USR_LANG') || $USR_LANG;
   $L            = lc( $L );
@@ -1484,13 +1559,14 @@ sub get_config ( $ ) {
   }
 
   # Apache Config directive - PerlSetVar -
-  $The_Newsgroup = $r->dir_config( 'NNTPGatewayNewsGroup' );
+  $The_Newsgroup        = $r->dir_config( 'NNTPGatewayNewsGroup' );
   unless ( $The_Newsgroup ) {
     # NewsGroup is a required config parameter
     $r->log_error( "Configuration directive NNTPGatewayNewsGroup should be set in <Location $Base>!" );
     return 0;
   }
-  $NNTP_Server           = $r->dir_config( 'NNTPGatewayNewsServer' ) || $DEFAULT_NEWS_SERVER;
+  $The_GroupDescription = $r->dir_config( 'NNTPGatewayGroupDescription' ) || '&nbsp;';
+  $NNTP_Server          = $r->dir_config( 'NNTPGatewayNewsServer' ) || $DEFAULT_NEWS_SERVER;
   $NewsUrl              = "news://${NNTP_Server}/${The_Newsgroup}";
   $DEFAULT_ACTION_NAME  = $r->dir_config( 'NNTPGatewayDefaultAction' ) || $DEFAULT_ACTION_NAME;
   $Catchup_Cookie_Name  = 'NNTPGatewayCatchup.' . $The_Newsgroup;
@@ -1562,21 +1638,22 @@ sub check_user ( $ ) {
 
   # The_User is a global... 
   # 1/ Try to check username through indent
-  #    (IdentityCheck) and then with Http authentification.
+  #    (IdentityCheck) and then with Http authentication.
   $The_User = $r->get_remote_logname() || $r->connection->user() || undef;
   if ( $The_User &&
        &is_true( $r->dir_config( 'NNTPGatewayUsersNamesCaseInsensitive' ))) {
     $The_User = lc( $The_User );
   }
   # The following list should be configurable maybe ?
-  $The_User = undef if ( 
-                        $The_User eq '-'         || 
-                        $The_User eq 'unknown'   || 
-                        $The_User eq 'anonymous' || 
-                        $The_User eq 'guest'     || 
-                        $The_User eq 'admin'     || 
-                        $The_User eq 'root' 
-                       );
+  $The_User = undef if 
+    ( 
+     $The_User eq '-'         || 
+     $The_User eq 'unknown'   || 
+     $The_User eq 'anonymous' || 
+     $The_User eq 'guest'     || 
+     $The_User eq 'admin'     || 
+     $The_User eq 'root' 
+    );
 
   # 2/ Check username validity, by checking if a local (Unix) account
   #    exists for the user. This check is mainly for posting actions,
@@ -1586,7 +1663,7 @@ sub check_user ( $ ) {
   $The_User = undef if ( !$username && !&is_true( $r->dir_config( 'NNTPGatewayNonLocalPostOk' )));
 
   # 3/ Check if user allowed to use this service ... And build a choice of possible
-  #    From adresses.
+  #    From addresses.
   if ( $Anonymous_Post_Allowed ) {
     
     # Populate from posters list with some anonymous one...
@@ -1699,15 +1776,18 @@ __END__
 
 # Documentation ----------------------------------------------------------
 
+
 =head1 NAME
 
-B<Apache::NNTPGateway> - A NNTP interface for mod_perl enabled Apache web server.
+B<Apache::NNTPGateway> - A NNTP interface (Usenet newsgroups) for
+mod_perl enabled Apache web server.
+
 
 =head1 SYNOPSIS
 
  You must be using mod_perl, see http://perl.apache.org/ for details.
 
- For the correct work your apache configuration would contain apache
+ For  the  correct work   your  apache configuration  should  contain   apache
  directives look like these:
 
  In httpd.conf (or any other apache configuration file):
@@ -1715,29 +1795,30 @@ B<Apache::NNTPGateway> - A NNTP interface for mod_perl enabled Apache web server
  <Location "/path/to/newsgroup">
     SetHandler		perl-script
     PerlHandler		Apache::NNTPGateway
-    PerlSetVar		NTTPGatewayNewsGroup "newsgroup"
-    PerlSetVar		NTTPGateway... (see L<CONFIGURATION> Directives)
+    PerlSetVar		NNTPGatewayNewsGroup "newsgroup"
+    PerlSetVar		NNTPGateway... (see L<CONFIGURATION> Directives)
  </Location>
+
 
 =head1 DESCRIPTION
 
- This module implements a per group interface to NNTP (Usenet)
- News-Groups, it allow users to list, read, post, followup ... articles
- in a given newsgroup/newsserver depending of configuration. This is
- not a replacement for a real powerful newsreader client but just
- pretend to be a simple, useful mapping of some news articles into a
- web space.
+ This module implements a per group interface to NNTP (Usenet) News-Groups, it
+ allow users to   list,    read, post, followup   ...  articles   in a   given
+ newsgroup/newsserver  depending of configuration.  This  is not a replacement
+ for a real powerful newsreader client but just pretend to be a simple, useful
+ mapping of some news articles into a web space.
 
 =head2 ACTIONS
 
  Here is the list of all actions that can be performed on the current newsgroup.
 
+
 =over 4
 
 =item list
 
-  List articles, all articles from the current newsgroup or only unread
-  articles if the user/client allready did a B<catchup>.
+  List articles,   all  articles from   the current newsgroup  or  only unread
+  articles if the user/client already did a B<catchup>.
 
 =item catchup
 
@@ -1761,17 +1842,17 @@ B<Apache::NNTPGateway> - A NNTP interface for mod_perl enabled Apache web server
 
 =back
 
+
 =head1 CONFIGURATION 
 
-  Except some very few optional adjustements in the module source
-  itself all configuration is done with B<PerlSetVar> directives in
-  Apache configurations files.
+  Except some very few  optional adjustments in  the module source itself all
+  configuration is done with B<PerlSetVar> directives in Apache configurations
+  files.
 
 =head2 Directives
 
- All following features of this PerlHandler, will be set in the apache
- configuration files. For this you can use PerlSetVar apache
- directive.
+ All  following features of    this PerlHandler, will   be  set in the  apache
+ configuration files. For this you can use PerlSetVar apache directive.
 
 =over 4
 
@@ -1779,14 +1860,20 @@ B<Apache::NNTPGateway> - A NNTP interface for mod_perl enabled Apache web server
 
  (string, B<mandatory>)
 
- The newsgroup used for the current NNTPGateway location. Not setting
- this will make NNTPGateway fail.
+ The newsgroup used  for  the current NNTPGateway  location. Not  setting this
+ will make NNTPGateway fail.
+
+=item NNTPGatewayGroupDescription
+
+ (string, I<optional>)
+
+ Short description (1 or 2 lines) of what this newsgroup is for/contain.
 
 =item NNTPGatewayStop 
 
  (boolean, I<optional>)
 
- Tell to completely disable NNTPGateway, useful for temporary maintainance.
+ Tell to completely disable NNTPGateway, useful for temporary maintenance.
 
 =item NNTPGatewayDefaultAction
 
@@ -1798,31 +1885,31 @@ B<Apache::NNTPGateway> - A NNTP interface for mod_perl enabled Apache web server
 
  (string, I<optional>)
 
-  When using correctly configured perl modules B<Net::Domain>,
-  B<Net::Config> on a correctly configured system this should not be
-  changed, in theory NNTPGateway could be able to handle multiples
-  news server but this is greatly nor recommended (see L<BUGS>) unless
-  you really know what you are doing.
+  When using correctly  configured perl modules B<Net::Domain>, B<Net::Config>
+  on  a correctly  configured  system this should   not be changed, in  theory
+  NNTPGateway could   be able to  handle  multiples  news server   but this is
+  greatly nor  recommended (see L<BUGS>) unless  you really  know what you are
+  doing.
 
 =item NNTPGatewayOrganization
 
-  (string, B<recommended>) Default value: B<The Disoganized Corp>
+  (string, B<recommended>) Default value: B<The Disorganized Corp>
 
   Set the Organization header when posting articles.
 
 =item NNTPGatewayTitle
 
   (string, I<optional>)
-  
+
   Title displayed in NNTPGateway pages.
 
 =item NNTPGatewayStyleSheet
 
   (string, I<optional>)
 
-  Set the style sheet used in NNTPGateway pages, or none. There are
-  some few classes in the generated HTML, check the source to use them
-  in your style sheet.
+  Set the style sheet used  in NNTPGateway pages,  or none. There are some few
+  classes in the  generated HTML, check  the source to use  them in your style
+  sheet.
 
 =item NNTPGatewayAnonymousPostAllowed
 
@@ -1837,8 +1924,8 @@ B<Apache::NNTPGateway> - A NNTP interface for mod_perl enabled Apache web server
   A list of pair email=Name that could be used for anonymous
   posts. I'm B<Absolutely> not responsible for any abuse of this
   feature, this is up to the webmaster to control it's usage.
- 
-  Ex: 
+
+  Ex:
   C<PerlSetVar NNTPGatewayAnonymousPosters "anon=The Unknown Soldier,president=The Big Boss"> 
 
 =item NNTPGatewayNonLocalPostOk
@@ -1866,121 +1953,155 @@ B<Apache::NNTPGateway> - A NNTP interface for mod_perl enabled Apache web server
 =item NNTPGatewayTemplatesDir
 
   (string, L<optional>) Default value: B<lib/templates/NNTPGateway/>
-  
+
   ServerRoot relative Directory where to find HTML templates files (not yet Implemented). 
- 
+
 =item NNTPGatewayDebug 
 
   (boolean, I<optional>) Default value: B<off>
-  
+
   Set this to debug NNTPGateway. 
 
 =back
 
+
 =head1 SECURITY
 
-  If you B<allow> Anonymous posting absolutely no security checks are
-  performed unless you protect access to the Location this handler is
-  located on, but that is not the job of this module.
+  If   you  B<allow>  Anonymous posting  absolutely   no  security  checks are
+  performed unless you protect access to the  Location this handler is located
+  on, but that is not the job of this module.
 
-  If you B<deny> Anonymous posting, the handler will check
-  B<remote_ident> (via Identd) or B<remote_user> and will check if
-  they are valid username by checking C<getpwnam()> (a list of some
-  generic usernames such as: root, anonymous ... are not considered as
-  valid too, even if they are), if directive
-  B<NNTPGatewayNonLocalPostOk> had not been set, if they are not they
-  are rejected, if they are they could post and the From header will
-  be set to that username. That is the only security check the handler
-  will do, it is up to other apaches modules to correctly protect the
-  Location and set valid usernames (enable identd or loggin via
-  AuthNIS or anything else).
+  If  you B<deny>  Anonymous posting, the   handler will check B<remote_ident>
+  (via Identd) or B<remote_user> and will check  if they are valid username by
+  checking C<getpwnam()> (a list   of some generic  usernames such   as: root,
+  anonymous  ...  are not   considered  as valid  too, even  if  they are), if
+  directive B<NNTPGatewayNonLocalPostOk>  had not  been  set, if they are  not
+  they are rejected, if they  are they could post and  the From header will be
+  set to that username.  That is the only security  check the handler will do,
+  it is up to other apaches modules to correctly protect  the Location and set
+  valid usernames (enable identd or loggin via AuthNIS or anything else).
 
-  Furthermore the webmaster could disable the use of some actions such
-  as post, followup ...
+  Furthermore the webmaster could   disable the use   of some actions such  as
+  post, followup ...
+
 
 =head1 BUGS
 
- The connection to the nntp server is handled in a global variable so
- that the connection is common to all requests in the current apache
- child process. Due to that, when the module is used with 2 differents
- configs (in 2 <Location xxx>) setting 2 differents newsservers and
- that 2 requests are made in the same child with these 2 configs (or
- more) ... the second request could re-use a NNTP connection (open
- during the 1st request) already open to the B<first> server. I do not
- want to make the nntp object a local variable, because the connection
- is a long process ... But anyway, I have some few ideas of how to
- solve the problem, but as I am lazy and my configuration do not have
- this problem I am waiting for pressure from eventual module users
- ...;-)
+ The connection to the nntp server is handled in a global variable so that the
+ connection is common to all requests in the current apache child process. Due
+ to that,  when the module is  used with 2  differents configs (in 2 <Location
+ xxx>) setting  2 differents newsservers  and that 2 requests  are made in the
+ same child with these 2 configs (or more) ... the second request could re-use
+ a NNTP connection (open during the 1st request)  already open to the B<first>
+ server. I do not  want to make the nntp  object a local variable, because the
+ connection is a long process ... But anyway, I have some  few ideas of how to
+ solve the  problem, but as  I am lazy and  my configuration do not  have this
+ problem I am waiting for pressure from eventual module users ...;-)
 
 
 =head1 Changes
 
+=over 4
+
+=item v0.9
+
+ * Article id or subject added to title in read.
+ * More CSS classes everywhere... read the sources.
+ * use Apache::Log qw(); to access to log functions.
+ * Makefile.PL improved to really check used modules versions.
+ * Call  Net::Cmd functions in a  clean manner to make perl  5.6 happy (end of
+   that Bareword "CMD_ERROR" install bug).
+
 =item v0.8
 
  * Cookie domain better handled for catchup.
- * NNTPGatewayNewsGroupTest removed. Set up a new Location and set
-   NNTPGatewayNewsGroup to the test group and NNTPGatewayDebug on to
-   acheive the same fonctionnality.
- * Some more directives to control users checking
+ * NNTPGatewayNewsGroupTest   removed.  Set  up    a  new  Location  and   set
+   NNTPGatewayNewsGroup to  the test group and  NNTPGatewayDebug on to achieve
+   the same functionality.
+ * Some       more       directives   to       control        users   checking
    (NNTPGatewayUsersNamesCaseInsensitive, NNTPGatewayNonLocalPostOk).
  * Some handling of Cache-Control.
  * Made this module ready for my first CPAN contribution ;-)
  ** Cleaning source code.
  ** Cleaning Documentation.
- ** CPAN Enabled distrib (Makefile.PL, .tar.gz dist, README file, CPAN
-    ID ...).
+ ** CPAN  Enabled distrib (Makefile.PL,   .tar.gz dist,  README file, CPAN  ID
+    ...).
 
 =item v0.7
 
  * The configuration directive B<NNTPGatewayCatchupCookieName> do not exists anymore.
  * Disconnections to news server start to be better handled.
- 
+
 =item v0.6
 
  First public release
+
+=back
 
 
 =head1 TODO
 
 =over 4
 
-=item * 
- 
+=item *
+
  Safe sharing of the NNTP global.
 
-=item * 
+=item *
+
+ Keeping into account the If-Modified-Since, Last-Modified and so on ... stuff.
+
+=item *
 
  Using an HTML Template system (maybe HTML::Template) instead of hard coded html.
 
-=item * 
+=item *
 
  Improving the LANG selection stuff (maybe adding a new configuration directive?)
 
-=item * 
+=item *
 
  Improving the C<check_user()> stuff for more security.
 
-=item * 
+=item *
+
+ Integrating Jie Gao threaded view of articles list.
+
+=item *
 
  more stuff ...
 
 =back
 
+
+=head1 THANKS
+
+ Thanks a lot to these people for they help:
+
+=over 4
+
+=item * Jie Gao <J.Gao@isu.usyd.edu.au>
+ For his help to build a clean installation of the module.
+
+=back
+
+
 =head1 SEE ALSO
 
  perl(1), mod_perl(3), Apache(3), Net::NNTP(3), Net::Domain(3),
- Net::Config(3), rfc977
+ Net::Config(3), rfc9771, getpwnam(3)
+
 
 =head1 COPYRIGHT
 
- The application and accompanying modules are Copyright CENA Toulouse.
- It is free software and can be used, copied and redistributed at the
- same terms as perl itself.
+ The application and accompanying modules are Copyright  CENA Toulouse.  It is
+ free software and can be used, copied and  redistributed at the same terms as
+ perl itself.
+
 
 =head1 AUTHOR
 
- heddy Boubaker <boubaker@cena.fr>
+ heddy Boubaker <boubaker@cpan.org>
 
  Home page:
  http://www.tls.cena.fr/~boubaker/WWW/Apache-NNTPGateway.shtml
@@ -1988,4 +2109,3 @@ B<Apache::NNTPGateway> - A NNTP interface for mod_perl enabled Apache web server
 =cut
 
 ### NNTPGateway.pm ends here  ----------------------------------------------
-

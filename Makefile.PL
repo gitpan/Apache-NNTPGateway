@@ -6,16 +6,17 @@ WriteMakefile(
     'VERSION_FROM'	=> 'NNTPGateway.pm', # finds $VERSION
     'PREREQ_PM'		=> 
 	{
-	'Apache' => 0, 
-	'Apache::Constants' => 0, 
-	'Apache::URI' => 0, 
-	'Apache::Request' => 0, 
-	'CGI::Cookie' => 0, 
-	'Net::NNTP' => 0, 
-	'Net::Config' => 0, 
-	'Net::Cmd' => 0, 
-	'Net::Domain' => 0, 
-	'Mail::Address' => 0, 
-	'File::Spec' => 0, 
+	'Apache'            => 1.20, 
+	'Apache::Constants' => 1.0, 
+	'Apache::URI'       => 1.0, 
+	'Apache::Request'   => 0.30, 
+	'Apache::Log'       => 1.0, 
+	'CGI::Cookie'       => 1.10, 
+	'Net::NNTP'         => 2.0, 
+	'Net::Config'       => 1.10, 
+	'Net::Cmd'          => 2.0, 
+	'Net::Domain'       => 2.0, 
+	'Mail::Address'     => 1.10, 
+	'File::Spec'        => 0.80, 
 	}, # e.g., Module::Name => 1.1
 );
